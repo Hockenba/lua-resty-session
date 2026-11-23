@@ -1616,12 +1616,15 @@ local function destroy(self, remember, already_revoked)
   local storage = self.storage
 
   if not already_revoked then
-    local ok, err = mark_session_revoked(self, remember, meta)
+    -- The lineage mark goes first: it rejects every cookie of the login, so a
+    -- failure between the two writes cannot leave a cookie that the retry of the
+    -- logout (which sees the session id mark and does not destroy) would miss.
+    local ok, err = revoke_lineages(self, meta)
     if not ok then
       return nil, err
     end
 
-    ok, err = revoke_lineages(self, meta)
+    ok, err = mark_session_revoked(self, remember, meta)
     if not ok then
       return nil, err
     end
@@ -2532,7 +2535,13 @@ function metatable:destroy()
   end
 
   if remembered then
-    local ok, err = mark_session_revoked(self, true, self.remember_meta or {})
+    -- the lineage first, as in destroy
+    local ok, err = revoke_lineages(self, self.meta)
+    if not ok then
+      return nil, err
+    end
+
+    ok, err = mark_session_revoked(self, true, self.remember_meta or {})
     if not ok then
       return nil, err
     end

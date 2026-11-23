@@ -648,6 +648,7 @@ describe("session: revocation lineage", function()
   local marks
   local ttls
   local fail_lineage_writes
+  local fail_sid_writes
 
   local store = {
     get = function(_, _, key)
@@ -655,7 +656,7 @@ describe("session: revocation lineage", function()
     end,
     set = function(_, _, key, value, ttl)
       -- session id marks carry "1"; lineage marks carry the time they were written
-      if fail_lineage_writes and value ~= "1" then
+      if (fail_lineage_writes and value ~= "1") or (fail_sid_writes and value == "1") then
         return nil, "connection refused"
       end
       marks[key] = value
@@ -668,6 +669,7 @@ describe("session: revocation lineage", function()
     marks = {}
     ttls = {}
     fail_lineage_writes = false
+    fail_sid_writes = false
     session.init({
       cookie_name = cookie_name,
       storage = "cookie",
@@ -823,6 +825,52 @@ describe("session: revocation lineage", function()
     local ok, err = destroy(cookie)
     assert.is_nil(ok)
     assert.matches("unable to mark session revoked", err)
+    -- nothing was written, not even the session id mark
+    assert.is_nil(next(marks))
+  end)
+
+  it("can retry a logout whose lineage mark could not be written", function()
+    initialize("closed")
+
+    local original = login()
+    local rotated = rotate(original)
+    fail_lineage_writes = true
+
+    local ok, err = destroy(rotated)
+    assert.is_nil(ok)
+    assert.matches("unable to mark session revoked", err)
+    assert.is_nil(next(marks))
+
+    -- the cookie is still usable, so the browser can send the logout again
+    fail_lineage_writes = false
+    assert.is_true(destroy(rotated))
+
+    for _, cookie in ipairs({ original, rotated }) do
+      local _, opened, open_err = open(cookie)
+      assert.is_falsy(opened)
+      assert.equals("session revoked", open_err)
+    end
+  end)
+
+  it("revokes the whole lineage when only the session id mark could not be written", function()
+    initialize("closed")
+
+    local original = login()
+    local rotated = rotate(original)
+    fail_sid_writes = true
+
+    local ok, err = destroy(rotated)
+    assert.is_nil(ok)
+    assert.matches("unable to mark session revoked", err)
+
+    -- the lineage mark was written first, so a retry that never reaches destroy
+    -- still finds every cookie of the login revoked
+    fail_sid_writes = false
+    for _, cookie in ipairs({ original, rotated }) do
+      local _, opened, open_err = open(cookie)
+      assert.is_falsy(opened)
+      assert.equals("session revoked", open_err)
+    end
   end)
 
   it("does not add a lineage id when revocation is disabled", function()
