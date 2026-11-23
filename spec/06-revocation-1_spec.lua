@@ -604,9 +604,14 @@ describe("session: revocation cache", function()
         get_count = get_count + 1
         return nil
       end,
-      set = function()
+      set = function(_, _, _, value)
         set_count = set_count + 1
-        return nil, "connection refused"
+        -- the lineage mark is written first and succeeds; the session id mark
+        -- (which carries "1") fails
+        if value == "1" then
+          return nil, "connection refused"
+        end
+        return true
       end,
     }
 
@@ -626,12 +631,14 @@ describe("session: revocation cache", function()
     ok, err = s:destroy()
     assert.is_nil(ok)
     assert.matches("unable to mark session revoked", err)
-    assert.equals(1, set_count)
+    -- the lineage mark, then the session id mark that fails
+    assert.equals(2, set_count)
 
     ok, err = s:destroy()
     assert.is_nil(ok)
     assert.matches("unable to check session revocation", err)
-    assert.equals(1, set_count)
+    -- the lineage mark is written again; the cached error stops the session id write
+    assert.equals(3, set_count)
 
     local reopened
     reopened, ok, err = open_session()
