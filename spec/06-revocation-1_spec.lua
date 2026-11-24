@@ -1068,3 +1068,29 @@ describe("session: revocation cache with a named backend", function()
     assert.equals(4, gets)
   end)
 end)
+
+
+describe("session: revocation storage aliases", function()
+  -- building a session does not connect to the storage, so no backend is needed
+  local function revocation_id(configuration)
+    configuration.storage = "cookie"
+    return session.new(configuration).revocation_id
+  end
+
+  it("identifies a storage given by an alias by the settings load_storage reads", function()
+    -- load_storage reads the settings of the first name, or else of the second,
+    -- whichever of the two names is given
+    for _, names in ipairs({ { "memcached", "memcache" }, { "mysql", "mariadb" } }) do
+      local name, alias = names[1], names[2]
+      local one = { host = "127.0.0.1", port = 1 }
+      local other = { host = "127.0.0.1", port = 2 }
+
+      local by_name = revocation_id({ revocation = name, [name] = one })
+      assert.is_string(by_name)
+      assert.equals(by_name, revocation_id({ revocation = alias, [name] = one }))
+      assert.equals(by_name, revocation_id({ revocation = alias, [alias] = one }))
+      assert.equals(by_name, revocation_id({ revocation = name, [alias] = one }))
+      assert.not_equals(by_name, revocation_id({ revocation = alias, [alias] = other }))
+    end
+  end)
+end)
