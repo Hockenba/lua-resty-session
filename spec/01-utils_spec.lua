@@ -136,6 +136,50 @@ describe("Testing utils", function()
       end
     end)
   end)
+  describe("config_fingerprint", function()
+    local config_fingerprint = utils.config_fingerprint
+
+    it("gives equal settings the same fingerprint, whichever table they come from", function()
+      local one = config_fingerprint({ host = "127.0.0.1", port = 6379, nodes = { { ip = "a" }, { ip = "b" } } })
+      local two = config_fingerprint({ nodes = { { ip = "a" }, { ip = "b" } }, port = 6379, host = "127.0.0.1" })
+
+      assert.is_string(one)
+      assert.equal(one, two)
+    end)
+
+    it("tells different settings apart", function()
+      local base = config_fingerprint({ host = "127.0.0.1", port = 6379 })
+
+      assert.not_equal(base, config_fingerprint({ host = "127.0.0.1", port = 6380 }))
+      assert.not_equal(base, config_fingerprint({ host = "127.0.0.2", port = 6379 }))
+      assert.not_equal(base, config_fingerprint({ host = "127.0.0.1", port = "6379" }))
+      assert.not_equal(base, config_fingerprint({ host = "127.0.0.1", port = 6379, ssl = false }))
+      assert.not_equal(config_fingerprint({ list = { "a", "b" } }), config_fingerprint({ list = { "b", "a" } }))
+      -- a value cannot be moved from one key to the next
+      assert.not_equal(config_fingerprint({ a = "bc" }), config_fingerprint({ ab = "c" }))
+    end)
+
+    it("leaves out values that are not settings, at any depth", function()
+      local plain = config_fingerprint({ host = "127.0.0.1", nested = { port = 6379 } })
+      local with_values = config_fingerprint({
+        host = "127.0.0.1",
+        get = function() end,
+        nested = { port = 6379, set = function() end },
+      })
+
+      assert.equal(plain, with_values)
+    end)
+
+    it("returns an error for a table that refers to itself", function()
+      local configuration = { host = "127.0.0.1" }
+      configuration.self = configuration
+
+      local fingerprint, err = config_fingerprint(configuration)
+      assert.is_nil(fingerprint)
+      assert.is_string(err)
+    end)
+  end)
+
   describe("load_storage", function()
     -- "dshm" is disabled as it currently cannot be checked by CI
     for _, strategy in ipairs({ "memcached", "mysql", "postgres", "redis" }) do
