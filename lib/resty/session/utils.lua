@@ -871,6 +871,10 @@ local config_fingerprint do
   -- userdata, are left out, at any depth. Returns `nil` and an error when the
   -- table cannot be encoded at all, for example when it refers to itself.
   --
+  -- It needs a cjson with `encode_sort_keys` and
+  -- `encode_skip_unsupported_value_types`, as in OpenResty 1.31.8.1 or later, and
+  -- raises an error without them.
+  --
   -- @function utils.config_fingerprint
   -- @tparam table configuration configuration table
   -- @treturn string|nil fingerprint
@@ -883,9 +887,15 @@ local config_fingerprint do
   -- })
   config_fingerprint = function(configuration)
     if not cjson then
-      cjson = require("cjson.safe").new()
-      cjson.encode_sort_keys(true)
-      cjson.encode_skip_unsupported_value_types(true)
+      local instance = require("cjson.safe").new()
+      if not instance.encode_sort_keys or not instance.encode_skip_unsupported_value_types then
+        error("cjson has no encode_sort_keys or encode_skip_unsupported_value_types, "
+           .. "which session revocation needs (OpenResty 1.31.8.1 or later has them)", 2)
+      end
+
+      instance.encode_sort_keys(true)
+      instance.encode_skip_unsupported_value_types(true)
+      cjson = instance
     end
 
     local encoded, err = cjson.encode(configuration)

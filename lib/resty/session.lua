@@ -386,7 +386,7 @@ local REVOCATION_ERROR_CACHE
 -- session options. Each is read once per worker, when it is created, from an
 -- nginx variable, 1024 when it is not set. Define it where every request sees
 -- it, for example with a `map` in the http block.
-local function revocation_cache_size(name)
+local function get_revocation_cache_size(name)
   local size = DEFAULT_REVOCATION_CACHE_SIZE
   -- nginx variables are not available in every context, for example in timers
   local ok, configured = pcall(function() return var[name] end)
@@ -540,7 +540,7 @@ end
 -- A lineage id is generated when a session is first saved and travels in the
 -- encrypted payload through every rotation of the session id, so one logout
 -- can revoke every cookie descended from the same login.
-local function lineage_revocation_key(lineage)
+local function get_lineage_revocation_key(lineage)
   return "lineage:" .. lineage
 end
 
@@ -648,9 +648,9 @@ local function get_lineage_ttl(self, current_time, creation_time)
 end
 
 
--- Revoke every cookie of the lineages of the session, so that a logout also
--- rejects the cookies that were rotated from the one the client presented.
-local function revoke_lineages(self, meta)
+-- Mark the lineages of the session revoked, so that a logout also rejects the
+-- cookies that were rotated from the one the client presented.
+local function mark_lineages_revoked(self, meta)
   local revocation = self.revocation
   if self.storage or not revocation or not meta or not meta.sid or not meta.creation_time then
     return true
@@ -659,7 +659,7 @@ local function revoke_lineages(self, meta)
   for _, lineage in ipairs(get_lineages(self)) do
     local current_time = time()
     local ttl = get_lineage_ttl(self, current_time, meta.creation_time)
-    local key, herr = self.hash_storage_key(lineage_revocation_key(lineage))
+    local key, herr = self.hash_storage_key(get_lineage_revocation_key(lineage))
     if not key then
       return nil, herr
     end
@@ -1198,7 +1198,7 @@ local function open(self, remember, meta_only)
       if remember or i == audience_index then
         local revoked, err = false, nil
         if data[i][4] then
-          revoked, err = is_revoked(self, lineage_revocation_key(data[i][4]), self.cookie_name, current_time, creation_time)
+          revoked, err = is_revoked(self, get_lineage_revocation_key(data[i][4]), self.cookie_name, current_time, creation_time)
         end
         if err then
           return nil, err
@@ -1631,10 +1631,10 @@ local function destroy(self, remember, already_revoked)
   local storage = self.storage
 
   if not already_revoked then
-    -- The lineage mark goes first: it rejects every cookie of the login, so a
-    -- failure between the two writes cannot leave a cookie that the retry of the
+    -- The lineage marks go first: they reject every cookie of the login, so a
+    -- failure between the writes cannot leave a cookie that the retry of the
     -- logout (which sees the session id mark and does not destroy) would miss.
-    local ok, err = revoke_lineages(self, meta)
+    local ok, err = mark_lineages_revoked(self, meta)
     if not ok then
       return nil, err
     end
@@ -2550,8 +2550,8 @@ function metatable:destroy()
   end
 
   if remembered then
-    -- the lineage first, as in destroy
-    local ok, err = revoke_lineages(self, self.meta)
+    -- the lineage marks first, as in destroy
+    local ok, err = mark_lineages_revoked(self, self.meta)
     if not ok then
       return nil, err
     end
@@ -2936,7 +2936,7 @@ function session.init(configuration)
   DEFAULT_RESPONSE_HEADERS           = opt(configuration, "response_headers")
   DEFAULT_STORAGE                    = opt(configuration, "storage")
   DEFAULT_REVOCATION                 = opt(configuration, "revocation")
-  DEFAULT_REVOCATION_ID              = configuration and get_revocation_id(configuration.revocation, configuration)
+  DEFAULT_REVOCATION_ID              = configuration and not DEFAULT_STORAGE and get_revocation_id(configuration.revocation, configuration) or nil
   DEFAULT_REVOCATION_FAIL_MODE       = opt(configuration, "revocation_fail_mode", "open")
   DEFAULT_REVOCATION_CACHE_TTL       = opt(configuration, "revocation_cache_ttl", 5)
   DEFAULT_REVOCATION_ERROR_CACHE_TTL = opt(configuration, "revocation_error_cache_ttl", 5)
@@ -2998,6 +2998,14 @@ function session.new(configuration)
   local response_headers           = opt(configuration, "response_headers",           DEFAULT_RESPONSE_HEADERS)
   local storage                    = opt(configuration, "storage",                    DEFAULT_STORAGE)
   local revocation                 = opt(configuration, "revocation",                 DEFAULT_REVOCATION)
+  local revocation_fail_mode       = opt(configuration, "revocation_fail_mode",       DEFAULT_REVOCATION_FAIL_MODE)
+  local revocation_cache_ttl       = opt(configuration, "revocation_cache_ttl",       DEFAULT_REVOCATION_CACHE_TTL)
+  local revocation_error_cache_ttl = opt(configuration, "revocation_error_cache_ttl", DEFAULT_REVOCATION_ERROR_CACHE_TTL)
+
+  if storage then
+    revocation = nil
+  end
+
   local revocation_id
   if revocation then
     local raw = configuration and configuration.revocation
@@ -3007,13 +3015,6 @@ function session.new(configuration)
     else
       revocation_id = get_revocation_id(raw, configuration)
     end
-  end
-  local revocation_fail_mode       = opt(configuration, "revocation_fail_mode",       DEFAULT_REVOCATION_FAIL_MODE)
-  local revocation_cache_ttl       = opt(configuration, "revocation_cache_ttl",       DEFAULT_REVOCATION_CACHE_TTL)
-  local revocation_error_cache_ttl = opt(configuration, "revocation_error_cache_ttl", DEFAULT_REVOCATION_ERROR_CACHE_TTL)
-
-  if storage then
-    revocation = nil
   end
 
   if cookie_prefix == "__Host-" then
@@ -3068,8 +3069,8 @@ function session.new(configuration)
   local cookie_flags = FLAGS_BUFFER:get()
 
   if REVOCATION_CACHE == nil and revocation and (revocation_cache_ttl > 0 or revocation_error_cache_ttl > 0) then
-    REVOCATION_CACHE = assert(require("resty.lrucache").new(revocation_cache_size("session_revocation_cache_size")))
-    REVOCATION_ERROR_CACHE = assert(require("resty.lrucache").new(revocation_cache_size("session_revocation_error_cache_size")))
+    REVOCATION_CACHE = assert(require("resty.lrucache").new(get_revocation_cache_size("session_revocation_cache_size")))
+    REVOCATION_ERROR_CACHE = assert(require("resty.lrucache").new(get_revocation_cache_size("session_revocation_error_cache_size")))
   end
 
   local self = setmetatable({

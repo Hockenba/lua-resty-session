@@ -170,6 +170,28 @@ describe("Testing utils", function()
       assert.equal(plain, with_values)
     end)
 
+    it("raises an error when cjson cannot sort keys", function()
+      local utils_module = package.loaded["resty.session.utils"]
+      local cjson_module = package.loaded["cjson.safe"]
+      finally(function()
+        package.loaded["resty.session.utils"] = utils_module
+        package.loaded["cjson.safe"] = cjson_module
+      end)
+
+      -- a cjson without encode_sort_keys, as in older OpenResty releases
+      package.loaded["cjson.safe"] = {
+        new = function()
+          return { encode = function() return "{}" end }
+        end,
+      }
+      package.loaded["resty.session.utils"] = nil
+      local fresh = require("resty.session.utils")
+
+      local ok, err = pcall(fresh.config_fingerprint, { host = "127.0.0.1" })
+      assert.is_false(ok)
+      assert.matches("encode_sort_keys", err, 1, true)
+    end)
+
     it("returns an error for a table that refers to itself", function()
       local configuration = { host = "127.0.0.1" }
       configuration.self = configuration
