@@ -402,6 +402,18 @@ local function get_revocation_cache_size(name)
 end
 
 
+-- Storages that load_storage accepts under two names. Whichever is given, it
+-- reads the settings of the first name, or else of the second.
+local REVOCATION_STORAGE_NAMES = {
+  memcached  = { "memcached", "memcache" },
+  memcache   = { "memcached", "memcache" },
+  mysql      = { "mysql", "mariadb" },
+  mariadb    = { "mysql", "mariadb" },
+  postgres   = { "postgres", "postgresql" },
+  postgresql = { "postgres", "postgresql" },
+}
+
+
 -- A storage is identified by its settings, not by the table that holds them: a
 -- storage given by name is created again by every session.new, and the same
 -- settings can come from different tables. Equal settings share cache entries,
@@ -409,8 +421,15 @@ end
 local function get_revocation_id(revocation, configuration)
   local name, settings
   if type(revocation) == "string" then
-    name = revocation
-    settings = configuration and configuration[revocation]
+    local names = REVOCATION_STORAGE_NAMES[revocation]
+    if names then
+      name = names[1]
+      settings = configuration and (configuration[names[1]] or configuration[names[2]])
+
+    else
+      name = revocation
+      settings = configuration and configuration[revocation]
+    end
 
   elseif type(revocation) == "table" then
     name = "table"
@@ -443,7 +462,7 @@ end
 local function revocation_cache_get(self, cookie_name, key)
   local cache_key = get_revocation_cache_key(self, cookie_name, key)
   local value = REVOCATION_CACHE:get(cache_key)
-  if value == true or value == false or type(value) == "number" then
+  if value == true or value == false then
     return value
   end
 
@@ -481,7 +500,7 @@ local function handle_revocation_error(self, err, msg)
 end
 
 
-local function is_revoked(self, key, cookie_name, current_time, creation_time)
+local function is_revoked(self, key, cookie_name, current_time)
   local revocation = self.revocation
   if not revocation then
     return false, nil
@@ -503,10 +522,6 @@ local function is_revoked(self, key, cookie_name, current_time, creation_time)
     if value == true or value == false then
       return value
     end
-
-    if type(value) == "number" then
-      return value >= creation_time, nil
-    end
   end
 
   local data, err = revocation:get(cookie_name, storage_key, current_time)
@@ -527,13 +542,12 @@ local function is_revoked(self, key, cookie_name, current_time, creation_time)
     return false, nil
   end
 
-  local revoked_at = tonumber(data)
-  local cached = data == REVOCATION_MARK or revoked_at or false
+  local revoked = data == REVOCATION_MARK
   if cache_ttl > 0 then
-    revocation_cache_set(self, cookie_name, storage_key, cached, cache_ttl)
+    revocation_cache_set(self, cookie_name, storage_key, revoked, cache_ttl)
   end
 
-  return cached == true or (revoked_at ~= nil and revoked_at >= creation_time), nil
+  return revoked, nil
 end
 
 
@@ -567,7 +581,7 @@ local function mark_session_revoked(self, remember, meta)
   end
 
   local current_time = time()
-  local revoked, revocation_err = is_revoked(self, sid, cookie_name, current_time, meta.creation_time)
+  local revoked, revocation_err = is_revoked(self, sid, cookie_name, current_time)
   if revocation_err then
     return nil, revocation_err
   end
@@ -664,7 +678,7 @@ local function mark_lineages_revoked(self, meta)
       return nil, herr
     end
 
-    local ok, err = revocation:set(self.cookie_name, key, tostring(current_time), ttl, current_time)
+    local ok, err = revocation:set(self.cookie_name, key, REVOCATION_MARK, ttl, current_time)
     if not ok then
       ok, err = handle_revocation_error(self, err, "unable to mark session revoked")
       if not ok then
@@ -674,7 +688,7 @@ local function mark_lineages_revoked(self, meta)
     else
       local cache_ttl = self.revocation_cache_ttl
       if cache_ttl > 0 then
-        revocation_cache_set(self, self.cookie_name, key, current_time, min(cache_ttl, ttl))
+        revocation_cache_set(self, self.cookie_name, key, true, min(cache_ttl, ttl))
       end
     end
   end
@@ -1026,7 +1040,7 @@ local function open(self, remember, meta_only)
     end
   end
 
-  local revoked, err = is_revoked(self, sid, cookie_name, current_time, creation_time)
+  local revoked, err = is_revoked(self, sid, cookie_name, current_time)
   if err then
     return nil, err
   end
@@ -1193,12 +1207,15 @@ local function open(self, remember, meta_only)
     end
   end
 
+  -- A remember cookie, or a cookie without the audience, is checked for the
+  -- lineages of all its audiences: a cookie saved for a new audience would carry
+  -- them along, and with them a login that was logged out.
   if self.revocation then
     for i = 1, count do
-      if remember or i == audience_index then
+      if remember or not audience_index or i == audience_index then
         local revoked, err = false, nil
         if data[i][4] then
-          revoked, err = is_revoked(self, get_lineage_revocation_key(data[i][4]), self.cookie_name, current_time, creation_time)
+          revoked, err = is_revoked(self, get_lineage_revocation_key(data[i][4]), self.cookie_name, current_time)
         end
         if err then
           return nil, err
@@ -1631,15 +1648,7 @@ local function destroy(self, remember, already_revoked)
   local storage = self.storage
 
   if not already_revoked then
-    -- The lineage marks go first: they reject every cookie of the login, so a
-    -- failure between the writes cannot leave a cookie that the retry of the
-    -- logout (which sees the session id mark and does not destroy) would miss.
-    local ok, err = mark_lineages_revoked(self, meta)
-    if not ok then
-      return nil, err
-    end
-
-    ok, err = mark_session_revoked(self, remember, meta)
+    local ok, err = mark_session_revoked(self, remember, meta)
     if not ok then
       return nil, err
     end
@@ -2542,27 +2551,29 @@ function metatable:destroy()
     return nil, "unable to destroy nonexistent session"
   end
 
-  -- The remember session is revoked before any cookie is cleared, so a store
-  -- failure leaves the browser with cookies that can still retry the logout.
+  -- The lineage marks go first: they reject every cookie of the login, so a
+  -- failure before the session id marks cannot leave a cookie that the retry of
+  -- the logout (which stops at a session id mark and does not destroy) would
+  -- miss. The remember session is revoked before any cookie is cleared, so a
+  -- store failure leaves the browser with cookies that can still retry.
+  local ok, err = mark_lineages_revoked(self, self.meta)
+  if not ok then
+    return nil, err
+  end
+
   local remembered
   if get_remember(self) then
     remembered = self.remember_meta or open(self, true, true)
   end
 
   if remembered then
-    -- the lineage marks first, as in destroy
-    local ok, err = mark_lineages_revoked(self, self.meta)
-    if not ok then
-      return nil, err
-    end
-
     ok, err = mark_session_revoked(self, true, self.remember_meta or {})
     if not ok then
       return nil, err
     end
   end
 
-  local ok, err = destroy(self)
+  ok, err = destroy(self)
   if not ok then
     return nil, err
   end

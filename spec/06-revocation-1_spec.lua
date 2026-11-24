@@ -17,6 +17,14 @@ local time = ngx.time
 local it = it
 
 
+-- lineage marks are stored under the base64url of "lineage:<id>", which always
+-- starts like this, while a session id mark is the base64url of the session id
+local LINEAGE_KEY_PREFIX = "bGluZWFnZT"
+local function is_lineage_key(key)
+  return key:sub(1, #LINEAGE_KEY_PREFIX) == LINEAGE_KEY_PREFIX
+end
+
+
 local storage_configs = {
   file = {
     suffix = "revocation",
@@ -604,11 +612,10 @@ describe("session: revocation cache", function()
         get_count = get_count + 1
         return nil
       end,
-      set = function(_, _, _, value)
+      set = function(_, _, key)
         set_count = set_count + 1
-        -- the lineage mark is written first and succeeds; the session id mark
-        -- (which carries "1") fails
-        if value == "1" then
+        -- the lineage mark is written first and succeeds; the session id mark fails
+        if not is_lineage_key(key) then
           return nil, "connection refused"
         end
         return true
@@ -664,11 +671,11 @@ describe("session: revocation lineage", function()
       return marks[key]
     end,
     set = function(_, _, key, value, ttl)
-      -- session id marks carry "1"; lineage marks carry the time they were written
-      if (fail_lineage_writes and value ~= "1") or (fail_sid_writes and value == "1") then
+      local lineage = is_lineage_key(key)
+      if (fail_lineage_writes and lineage) or (fail_sid_writes and not lineage) then
         return nil, "connection refused"
       end
-      if value ~= "1" then
+      if lineage then
         lineage_writes = lineage_writes + 1
         if lineage_writes == fail_lineage_write_number then
           return nil, "connection refused"
@@ -822,8 +829,8 @@ describe("session: revocation lineage", function()
     assert.is_true(ok)
 
     local lineage_ttl
-    for key, value in pairs(marks) do
-      if value ~= "1" then
+    for key in pairs(marks) do
+      if is_lineage_key(key) then
         lineage_ttl = ttls[key]
       end
     end
@@ -954,6 +961,24 @@ describe("session: revocation lineage", function()
       assert.equals("session revoked", rejected_err)
       rejected:close()
     end
+  end)
+
+  it("rejects a logged out login when its cookie is opened for another audience", function()
+    initialize("closed")
+
+    local original = login()
+    local rotated = rotate(original)
+    assert.is_true(destroy(original))
+
+    -- the rotated cookie has its own session id, so only the lineage tells it is
+    -- logged out; opening it for an audience it does not have must not carry it on
+    session.__set_ngx_var({
+      ["cookie_" .. cookie_name] = rotated,
+    })
+    local s = session.new({ audience = "another" })
+    local ok, err = s:open()
+    assert.is_falsy(ok)
+    assert.equals("session revoked", err)
   end)
 
   it("does not add a lineage id when revocation is disabled", function()

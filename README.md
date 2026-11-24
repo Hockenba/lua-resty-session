@@ -391,20 +391,22 @@ TTL equal to the remaining session lifetime (rolling and absolute timeouts),
 and the local cache is updated immediately. When the write fails, the failure
 is cached for the same identifier under `revocation_error_cache_ttl`, so the
 next lookup sees it instead of the store. The revocation mark is a lightweight
-sentinel; no session payload is stored. The lineage mark is written without a
-lookup, so a remember-cookie logout may write it twice.
+sentinel; no session payload is stored. Lineage marks are written without a
+lookup.
 
-Lineage lookups cache the timestamp of the mark, which is compared with each
-session's creation time. Cache entries are isolated by revocation storage.
-A storage is identified by its settings, whether it is given by name
-(`"redis"`) or as a table: equal settings share cache entries, even from
-different tables, and different settings never do. Functions and other values
-that JSON cannot encode are left out of the settings, so a custom storage table
-needs a plain field, such as a name, that tells it apart from other custom
-storages. The settings are encoded with cjson, so this needs a cjson build with
-`encode_sort_keys` and `encode_skip_unsupported_value_types`, for example the one in
-OpenResty 1.31.8.1 or later. Without them, configuring revocation raises an error. A revocation updates the local worker cache at once. Other workers see it when their cached lookup
-expires; set `revocation_cache_ttl = 0` to check the store on every request.
+Cache entries are isolated by revocation storage. A storage is identified by its
+settings, whether it is given by name (`"redis"`) or as a table: equal settings
+share cache entries, even from different tables, and different settings never
+do. Functions and other values that JSON cannot encode are left out of the
+settings, so a custom storage table needs a plain field, such as a name, that
+tells it apart from other custom storages. The settings are encoded with cjson,
+so this needs a cjson build with `encode_sort_keys` and
+`encode_skip_unsupported_value_types`, for example the one in OpenResty 1.31.8.1
+or later. Without them, configuring revocation raises an error.
+
+A revocation updates the local worker cache at once. Other workers see it when
+their cached lookup expires; set `revocation_cache_ttl = 0` to check the store on
+every request.
 
 The marks live only in the revocation storage. If it loses its data, for example
 Redis restarted without persistence, revoked cookies are accepted again until
@@ -418,8 +420,10 @@ rotation. `session:destroy` revokes the lineage along with the session id, so
 every cookie of that login is rejected, whether it was issued before or after
 the logout. A new login starts a new lineage. The mark is kept for a full
 rolling window plus `stale_ttl`, capped by the absolute timeout (the `remember_*`
-windows when a remember cookie is used). Cookies issued before the lineage id
-existed are revoked by their own session id only. Each cache miss costs one more
+windows when a remember cookie is used). A remember cookie, or a cookie opened for
+an audience it does not have, is checked against the lineages of all its
+audiences. Cookies issued before the lineage id existed are revoked by their own
+session id only. Each cache miss costs one more
 lookup, and each destroy writes one more mark; `revocation_fail_mode` applies to
 both. The lineage marks are written before the session id mark, and the one of the
 audience in use last, so a failed logout can be retried: the session still opens
