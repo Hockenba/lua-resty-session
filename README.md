@@ -402,7 +402,8 @@ different tables, and different settings never do. Functions and other values
 that JSON cannot encode are left out of the settings, so a custom storage table
 needs a plain field, such as a name, that tells it apart from other custom
 storages. The settings are encoded with cjson, so this needs a cjson build with
-`encode_sort_keys` and `encode_skip_unsupported_value_types`. A revocation updates the local worker cache at once. Other workers see it when their cached lookup
+`encode_sort_keys` and `encode_skip_unsupported_value_types`, for example the one in
+OpenResty 1.31.8.1 or later. A revocation updates the local worker cache at once. Other workers see it when their cached lookup
 expires; set `revocation_cache_ttl = 0` to check the store on every request.
 
 The marks live only in the revocation storage. If it loses its data, for example
