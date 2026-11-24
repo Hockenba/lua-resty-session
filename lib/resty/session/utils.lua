@@ -860,80 +860,16 @@ end
 
 
 local config_fingerprint do
-  local type = type
-  local sort = table.sort
-  local concat = table.concat
-
-  -- Appends a canonical form of the value to parts: tables are written with
-  -- their keys sorted, so equal tables always give equal text. Values that
-  -- cannot be part of a setting (functions, userdata, threads) are left out.
-  -- Returns false when the table refers to itself.
-  local function canonical(value, parts, seen)
-    local value_type = type(value)
-    if value_type == "string" then
-      parts[#parts + 1] = fmt("s%d:%s", #value, value)
-
-    elseif value_type == "number" then
-      parts[#parts + 1] = fmt("n%.17g", value)
-
-    elseif value_type == "boolean" then
-      parts[#parts + 1] = value and "t" or "f"
-
-    elseif value_type == "table" then
-      if seen[value] then
-        return false
-      end
-
-      seen[value] = true
-
-      local keys = {}
-      for key, item in pairs(value) do
-        local key_type = type(key)
-        local item_type = type(item)
-        if (key_type == "string" or key_type == "number")
-        and (item_type == "string" or item_type == "number"
-          or item_type == "boolean" or item_type == "table")
-        then
-          keys[#keys + 1] = key
-        end
-      end
-
-      -- numbers before strings, each in their own order
-      sort(keys, function(a, b)
-        local a_type, b_type = type(a), type(b)
-        if a_type ~= b_type then
-          return a_type == "number"
-        end
-
-        return a < b
-      end)
-
-      parts[#parts + 1] = "{"
-      for _, key in ipairs(keys) do
-        canonical(key, parts, seen)
-        parts[#parts + 1] = "="
-        if not canonical(value[key], parts, seen) then
-          return false
-        end
-
-        parts[#parts + 1] = ","
-      end
-
-      parts[#parts + 1] = "}"
-      seen[value] = nil
-    end
-
-    return true
-  end
+  local cjson
 
   ---
   -- Fingerprint of a configuration table.
   --
-  -- The table is written in a canonical form, with sorted keys, and hashed, so
-  -- equal settings give the same fingerprint whichever table they come from, and
-  -- credentials are not kept in it. Values that cannot be part of a setting, such
-  -- as functions and userdata, are left out, at any depth. Returns `nil` and an
-  -- error when the table refers to itself.
+  -- The table is encoded as JSON with sorted keys and hashed, so equal settings
+  -- give the same fingerprint whichever table they come from, and credentials
+  -- are not kept in it. Values that cannot be encoded, such as functions and
+  -- userdata, are left out, at any depth. Returns `nil` and an error when the
+  -- table cannot be encoded at all, for example when it refers to itself.
   --
   -- @function utils.config_fingerprint
   -- @tparam table configuration configuration table
@@ -946,12 +882,18 @@ local config_fingerprint do
   --   port = 6379,
   -- })
   config_fingerprint = function(configuration)
-    local parts = {}
-    if not canonical(configuration, parts, {}) then
-      return nil, "configuration refers to itself"
+    if not cjson then
+      cjson = require("cjson.safe").new()
+      cjson.encode_sort_keys(true)
+      cjson.encode_skip_unsupported_value_types(true)
     end
 
-    return encode_base64url(assert(sha256(concat(parts))))
+    local encoded, err = cjson.encode(configuration)
+    if not encoded then
+      return nil, err
+    end
+
+    return encode_base64url(assert(sha256(encoded)))
   end
 end
 
