@@ -656,6 +656,8 @@ describe("session: revocation lineage", function()
   local ttls
   local fail_lineage_writes
   local fail_sid_writes
+  local fail_lineage_write_number
+  local lineage_writes
 
   local store = {
     get = function(_, _, key)
@@ -665,6 +667,12 @@ describe("session: revocation lineage", function()
       -- session id marks carry "1"; lineage marks carry the time they were written
       if (fail_lineage_writes and value ~= "1") or (fail_sid_writes and value == "1") then
         return nil, "connection refused"
+      end
+      if value ~= "1" then
+        lineage_writes = lineage_writes + 1
+        if lineage_writes == fail_lineage_write_number then
+          return nil, "connection refused"
+        end
       end
       marks[key] = value
       ttls[key] = ttl
@@ -677,6 +685,8 @@ describe("session: revocation lineage", function()
     ttls = {}
     fail_lineage_writes = false
     fail_sid_writes = false
+    fail_lineage_write_number = nil
+    lineage_writes = 0
     session.init({
       cookie_name = cookie_name,
       storage = "cookie",
@@ -877,6 +887,72 @@ describe("session: revocation lineage", function()
       local _, opened, open_err = open(cookie)
       assert.is_falsy(opened)
       assert.equals("session revoked", open_err)
+    end
+  end)
+
+  it("can retry a logout that failed after the first of the lineage marks of several audiences", function()
+    initialize("closed")
+
+    local function open_audience(cookie, audience)
+      session.__set_ngx_var({
+        ["cookie_" .. cookie_name] = cookie,
+      })
+      local s = session.new({ audience = audience })
+      local ok, err = s:open()
+      return s, ok, err
+    end
+
+    -- one cookie with two audiences, each with a lineage of its own
+    local cookies = {}
+    session.__set_ngx_header(cookies)
+    local first = session.new({ audience = "aud-a" })
+    first:set("test_key", "test_data")
+    assert.is_true(first:save())
+    local cookie = extract_cookie(cookie_name, cookies["Set-Cookie"])
+
+    local second, _, err = open_audience(cookie, "aud-b")
+    assert.equals("missing session audience", err)
+    cookies = {}
+    session.__set_ngx_header(cookies)
+    second:set("test_key", "test_data")
+    assert.is_true(second:save())
+    cookie = extract_cookie(cookie_name, cookies["Set-Cookie"])
+
+    local current, ok = open_audience(cookie, "aud-a")
+    assert.is_true(ok)
+    local lineages = {}
+    for _, entry in ipairs(current.data) do
+      assert.is_string(entry[4])
+      lineages[entry[4]] = true
+    end
+    assert.equals(2, #current.data)
+    assert.is_true(lineages[current.data[1][4]] and lineages[current.data[2][4]] and
+                   current.data[1][4] ~= current.data[2][4])
+    current:close()
+
+    -- the second lineage mark cannot be written
+    fail_lineage_write_number = 2
+    local logging_out, opened = open_audience(cookie, "aud-a")
+    assert.is_true(opened)
+    session.__set_ngx_header({})
+    local destroyed, destroy_err = logging_out:destroy()
+    assert.is_nil(destroyed)
+    assert.matches("unable to mark session revoked", destroy_err)
+
+    -- the store works again, and a new request retries with the original cookie:
+    -- the session still opens, because the mark of its audience is the last one
+    fail_lineage_write_number = nil
+    local retry, retry_opened, retry_err = open_audience(cookie, "aud-a")
+    assert.is_true(retry_opened)
+    assert.is_nil(retry_err)
+    session.__set_ngx_header({})
+    assert.is_true(retry:destroy())
+
+    for _, audience in ipairs({ "aud-a", "aud-b" }) do
+      local rejected, rejected_ok, rejected_err = open_audience(cookie, audience)
+      assert.is_falsy(rejected_ok)
+      assert.equals("session revoked", rejected_err)
+      rejected:close()
     end
   end)
 

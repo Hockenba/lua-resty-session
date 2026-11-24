@@ -419,9 +419,9 @@ rolling window plus `stale_ttl`, capped by the absolute timeout (the `remember_*
 windows when a remember cookie is used). Cookies issued before the lineage id
 existed are revoked by their own session id only. Each cache miss costs one more
 lookup, and each destroy writes one more mark; `revocation_fail_mode` applies to
-both. The lineage mark is written before the session id mark, so a failed
-logout can be retried: if only the second write fails, every cookie of the login is
-already revoked.
+both. The lineage marks are written before the session id mark, and the one of the
+audience in use last, so a failed logout can be retried: the session still opens
+until its own mark is stored, and by then every other mark is already written.
 
 Use `revocation_fail_mode` to control behavior when the storage is unavailable:
 

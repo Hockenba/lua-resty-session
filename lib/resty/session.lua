@@ -603,16 +603,31 @@ local function mark_session_revoked(self, remember, meta)
 end
 
 
--- The lineage ids of the audiences in the session, without duplicates.
+-- The lineage ids of the audiences in the session, without duplicates, and with
+-- the one of the audience in use last. A cookie is rejected on open as soon as the
+-- mark of that audience is stored, so it has to be the last mark written: when a
+-- write fails, the retry of the logout still opens the session and writes the
+-- marks again, instead of stopping at a cookie that is already revoked while the
+-- lineages of the other audiences are not.
 local function get_lineages(self)
   local lineages = {}
   local seen = {}
+  local current = self.data[self.data_index]
+  current = current and current[4]
+  if current then
+    seen[current] = true
+  end
+
   for i = 1, #self.data do
     local lineage = self.data[i][4]
     if lineage and not seen[lineage] then
       seen[lineage] = true
       lineages[#lineages + 1] = lineage
     end
+  end
+
+  if current then
+    lineages[#lineages + 1] = current
   end
 
   return lineages
