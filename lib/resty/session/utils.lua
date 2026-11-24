@@ -905,6 +905,49 @@ local config_fingerprint do
 end
 
 
+local get_storage_settings do
+  -- storages also accepted under a second name
+  local ALIASES = {
+    memcache   = "memcached",
+    mariadb    = "mysql",
+    postgresql = "postgres",
+  }
+
+  local SECOND_NAMES = {}
+  for alias, name in pairs(ALIASES) do
+    SECOND_NAMES[name] = alias
+  end
+
+  ---
+  -- Name and settings of a storage.
+  --
+  -- A storage accepted under two names, such as `"postgres"` and `"postgresql"`,
+  -- gets the first name, and the settings under either name, the first preferred.
+  --
+  -- @function utils.get_storage_settings
+  -- @tparam string storage name of the storage
+  -- @tparam[opt] table configuration session configuration
+  -- @treturn string name of the storage
+  -- @treturn table|nil settings of the storage
+  --
+  -- @usage
+  -- local name, settings = require("resty.session.utils").get_storage_settings("postgresql", {
+  --   postgres = {
+  --     host = "127.0.0.1",
+  --   }
+  -- })
+  get_storage_settings = function(storage, configuration)
+    local name = ALIASES[storage] or storage
+    if not configuration then
+      return name
+    end
+
+    local second_name = SECOND_NAMES[name]
+    return name, configuration[name] or (second_name and configuration[second_name])
+  end
+end
+
+
 local load_storage do
   local DSHM
   local FILE
@@ -933,73 +976,73 @@ local load_storage do
   --   }
   -- })
   load_storage = function(storage, configuration)
-    if storage == "cookie" then
+    local name, settings = get_storage_settings(storage, configuration)
+    if name == "cookie" then
       return nil
 
-    elseif storage == "dshm" then
+    elseif name == "dshm" then
       if not DSHM then
         DSHM = require("resty.session.dshm")
       end
-      return DSHM.new(configuration and configuration.dshm)
+      return DSHM.new(settings)
 
-    elseif storage == "file" then
+    elseif name == "file" then
       if not FILE then
         FILE = require("resty.session.file")
       end
-      return FILE.new(configuration and configuration.file)
+      return FILE.new(settings)
 
-    elseif storage == "memcached" or storage == "memcache" then
+    elseif name == "memcached" then
       if not MEMCACHED then
         MEMCACHED = require("resty.session.memcached")
       end
-      return MEMCACHED.new(configuration and configuration.memcached or configuration.memcache)
+      return MEMCACHED.new(settings)
 
-    elseif storage == "mysql" or storage == "mariadb" then
+    elseif name == "mysql" then
       if not MYSQL then
         MYSQL = require("resty.session.mysql")
       end
-      return MYSQL.new(configuration and configuration.mysql or configuration.mariadb)
+      return MYSQL.new(settings)
 
-    elseif storage == "postgres" or storage == "postgresql" then
+    elseif name == "postgres" then
       if not POSTGRES then
         POSTGRES = require("resty.session.postgres")
       end
-      return POSTGRES.new(configuration and configuration.postgres or configuration.postgresql)
+      return POSTGRES.new(settings)
 
-    elseif storage == "redis" then
-      local cfg = configuration and configuration.redis
-      if cfg then
-        if cfg.nodes then
+    elseif name == "redis" then
+      if settings then
+        if settings.nodes then
           if not REDIS_CLUSTER then
             REDIS_CLUSTER = require("resty.session.redis.cluster")
           end
-          return REDIS_CLUSTER.new(cfg)
+          return REDIS_CLUSTER.new(settings)
 
-        elseif cfg.sentinels then
+        elseif settings.sentinels then
           if not REDIS_SENTINEL then
             REDIS_SENTINEL = require("resty.session.redis.sentinel")
           end
-          return REDIS_SENTINEL.new(cfg)
+          return REDIS_SENTINEL.new(settings)
         end
       end
 
       if not REDIS then
         REDIS = require("resty.session.redis")
       end
-      return REDIS.new(cfg)
+      return REDIS.new(settings)
 
-    elseif storage == "shm" then
+    elseif name == "shm" then
       if not SHM then
         SHM = require("resty.session.shm")
       end
 
-      return SHM.new(configuration and configuration.shm)
+      return SHM.new(settings)
 
     else
-      if not CUSTOM[storage] then
-        CUSTOM[storage] = require(storage)
+      if not CUSTOM[name] then
+        CUSTOM[name] = require(name)
       end
-      return CUSTOM[storage].new(configuration and configuration[storage])
+      return CUSTOM[name].new(settings)
     end
   end
 end
@@ -1241,6 +1284,7 @@ return {
   decrypt_aes_256_gcm = decrypt_aes_256_gcm,
   hmac_sha256 = hmac_sha256,
   config_fingerprint = config_fingerprint,
+  get_storage_settings = get_storage_settings,
   load_storage = load_storage,
   errmsg = errmsg,
   get_name = get_name,

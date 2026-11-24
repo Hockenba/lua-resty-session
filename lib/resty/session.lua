@@ -400,32 +400,12 @@ local function get_revocation_cache_size(name)
 end
 
 
--- Storages load_storage accepts under two names: it reads the settings of the
--- first name, or else of the second.
-local REVOCATION_STORAGE_NAMES = {
-  memcached  = { "memcached", "memcache" },
-  memcache   = { "memcached", "memcache" },
-  mysql      = { "mysql", "mariadb" },
-  mariadb    = { "mysql", "mariadb" },
-  postgres   = { "postgres", "postgresql" },
-  postgresql = { "postgres", "postgresql" },
-}
-
-
 -- A storage is identified by its settings, not by the table holding them, so
 -- equal settings share cache entries and different settings never do.
 local function get_revocation_id(revocation, configuration)
   local name, settings
   if type(revocation) == "string" then
-    local names = REVOCATION_STORAGE_NAMES[revocation]
-    if names then
-      name = names[1]
-      settings = configuration and (configuration[names[1]] or configuration[names[2]])
-
-    else
-      name = revocation
-      settings = configuration and configuration[revocation]
-    end
+    name, settings = utils.get_storage_settings(revocation, configuration)
 
   elseif type(revocation) == "table" then
     name = "table"

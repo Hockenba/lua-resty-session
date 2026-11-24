@@ -202,6 +202,39 @@ describe("Testing utils", function()
     end)
   end)
 
+  describe("get_storage_settings", function()
+    it("gives a storage with two names the first one, and the settings of either", function()
+      local settings = { host = "127.0.0.1" }
+      local preferred = { host = "127.0.0.2" }
+      for _, names in ipairs({ { "memcached", "memcache" }, { "mysql", "mariadb" }, { "postgres", "postgresql" } }) do
+        local name, alias = names[1], names[2]
+        local found_name, found_settings = utils.get_storage_settings(alias, { [alias] = settings })
+        assert.equal(name, found_name)
+        assert.equal(settings, found_settings)
+
+        found_name, found_settings = utils.get_storage_settings(name, { [alias] = settings })
+        assert.equal(name, found_name)
+        assert.equal(settings, found_settings)
+
+        -- the settings of the first name are preferred
+        found_name, found_settings = utils.get_storage_settings(alias, { [name] = preferred, [alias] = settings })
+        assert.equal(name, found_name)
+        assert.equal(preferred, found_settings)
+      end
+    end)
+
+    it("keeps any other name as it is", function()
+      local settings = {}
+      local name, found_settings = utils.get_storage_settings("custom-storage", { ["custom-storage"] = settings })
+      assert.equal("custom-storage", name)
+      assert.equal(settings, found_settings)
+
+      name, found_settings = utils.get_storage_settings("redis")
+      assert.equal("redis", name)
+      assert.is_nil(found_settings)
+    end)
+  end)
+
   describe("load_storage", function()
     -- "dshm" is disabled as it currently cannot be checked by CI
     for _, strategy in ipairs({ "memcached", "mysql", "postgres", "redis" }) do
