@@ -865,15 +865,12 @@ local config_fingerprint do
   ---
   -- Fingerprint of a configuration table.
   --
-  -- The table is encoded as JSON with sorted keys and hashed, so equal settings
-  -- give the same fingerprint whichever table they come from, and credentials
-  -- are not kept in it. Values that cannot be encoded, such as functions and
-  -- userdata, are left out, at any depth. Returns `nil` and an error when the
-  -- table cannot be encoded at all, for example when it refers to itself.
-  --
-  -- It needs a cjson with `encode_sort_keys` and
-  -- `encode_skip_unsupported_value_types`, as in OpenResty 1.31.8.1 or later, and
-  -- raises an error without them.
+  -- A hash of the table encoded as JSON with sorted keys, so equal settings give
+  -- the same fingerprint whichever table holds them. Functions and other values
+  -- JSON cannot encode are left out. Returns `nil` and an error when the table
+  -- cannot be encoded, such as when it refers to itself. Needs a cjson with
+  -- `encode_sort_keys` and `encode_skip_unsupported_value_types` (OpenResty
+  -- 1.31.8.1 or later), and raises an error without them.
   --
   -- @function utils.config_fingerprint
   -- @tparam table configuration configuration table

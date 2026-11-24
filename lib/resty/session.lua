@@ -382,13 +382,11 @@ local REVOCATION_CACHE
 local REVOCATION_ERROR_CACHE
 
 
--- The caches are shared by every session of a worker, so their sizes are not
--- session options. Each is read once per worker, when it is created, from an
--- nginx variable, 1024 when it is not set. Define it where every request sees
--- it, for example with a `map` in the http block.
+-- The caches are per worker, so their sizes come from nginx variables, read once
+-- when the caches are created (default 1024).
 local function get_revocation_cache_size(name)
   local size = DEFAULT_REVOCATION_CACHE_SIZE
-  -- nginx variables are not available in every context, for example in timers
+  -- nginx variables are not available in every context, such as timers
   local ok, configured = pcall(function() return var[name] end)
   if ok and configured then
     size = tonumber(configured)
@@ -402,8 +400,8 @@ local function get_revocation_cache_size(name)
 end
 
 
--- Storages that load_storage accepts under two names. Whichever is given, it
--- reads the settings of the first name, or else of the second.
+-- Storages load_storage accepts under two names: it reads the settings of the
+-- first name, or else of the second.
 local REVOCATION_STORAGE_NAMES = {
   memcached  = { "memcached", "memcache" },
   memcache   = { "memcached", "memcache" },
@@ -414,10 +412,8 @@ local REVOCATION_STORAGE_NAMES = {
 }
 
 
--- A storage is identified by its settings, not by the table that holds them: a
--- storage given by name is created again by every session.new, and the same
--- settings can come from different tables. Equal settings share cache entries,
--- different settings never do.
+-- A storage is identified by its settings, not by the table holding them, so
+-- equal settings share cache entries and different settings never do.
 local function get_revocation_id(revocation, configuration)
   local name, settings
   if type(revocation) == "string" then
@@ -455,10 +451,8 @@ local function get_revocation_cache_key(self, cookie_name, key)
 end
 
 
--- Store errors are kept apart from the lookups, so that an outage cannot push
--- the lookups out. An error is cached as `false` when the fail mode is open and
--- as the message when closed, so it is kept per fail mode: one policy never
--- sees the other's.
+-- Store errors have their own cache, so an outage cannot evict the lookups, and
+-- are kept per fail mode, so one policy never reads the other's result.
 local function revocation_cache_get(self, cookie_name, key)
   local cache_key = get_revocation_cache_key(self, cookie_name, key)
   local value = REVOCATION_CACHE:get(cache_key)
@@ -551,11 +545,28 @@ local function is_revoked(self, key, cookie_name, current_time)
 end
 
 
--- A lineage id is generated when a session is first saved and travels in the
--- encrypted payload through every rotation of the session id, so one logout
--- can revoke every cookie descended from the same login.
+-- A lineage id is created on the first save and kept through every rotation of
+-- the session id, so one logout can revoke every cookie of the same login.
 local function get_lineage_revocation_key(lineage)
   return "lineage:" .. lineage
+end
+
+
+-- Whether the lineage of the audience in use is revoked. A remember cookie, or a
+-- cookie without that audience, is checked for all its lineages, since a cookie
+-- saved for another audience carries them along.
+local function is_lineage_revoked(self, data, audience_index, remember, current_time)
+  for i = 1, #data do
+    local lineage = data[i][4]
+    if lineage and (remember or not audience_index or i == audience_index) then
+      local revoked, err = is_revoked(self, get_lineage_revocation_key(lineage), self.cookie_name, current_time)
+      if revoked or err then
+        return revoked, err
+      end
+    end
+  end
+
+  return false, nil
 end
 
 
@@ -617,19 +628,16 @@ local function mark_session_revoked(self, remember, meta)
 end
 
 
--- The lineage ids of the audiences in the session, without duplicates, and with
--- the one of the audience in use last. A cookie is rejected on open as soon as the
--- mark of that audience is stored, so it has to be the last mark written: when a
--- write fails, the retry of the logout still opens the session and writes the
--- marks again, instead of stopping at a cookie that is already revoked while the
--- lineages of the other audiences are not.
+-- The lineage ids of the session's audiences, without duplicates, with the one of
+-- the audience in use last: once its mark is stored the cookie no longer opens,
+-- so writing it last lets a failed logout be retried.
 local function get_lineages(self)
   local lineages = {}
   local seen = {}
-  local current = self.data[self.data_index]
-  current = current and current[4]
-  if current then
-    seen[current] = true
+  local entry = self.data[self.data_index]
+  local current_lineage = entry and entry[4]
+  if current_lineage then
+    seen[current_lineage] = true
   end
 
   for i = 1, #self.data do
@@ -640,18 +648,17 @@ local function get_lineages(self)
     end
   end
 
-  if current then
-    lineages[#lineages + 1] = current
+  if current_lineage then
+    lineages[#lineages + 1] = current_lineage
   end
 
   return lineages
 end
 
 
--- How long a lineage mark is kept: a full rolling window from now, since a
--- sibling cookie may have been saved just before the logout, plus the stale ttl
--- for a request still running. The absolute timeout caps it, and a remember
--- cookie uses the longer remember windows.
+-- A full rolling window from now (a sibling cookie may have been saved just
+-- before the logout) plus the stale ttl, capped by the absolute timeout; the
+-- remember windows when a remember cookie is used.
 local function get_lineage_ttl(self, current_time, creation_time)
   local ttl = get_store_ttl(self, false, current_time, creation_time)
   if self.remember or self.remember_meta then
@@ -662,8 +669,8 @@ local function get_lineage_ttl(self, current_time, creation_time)
 end
 
 
--- Mark the lineages of the session revoked, so that a logout also rejects the
--- cookies that were rotated from the one the client presented.
+-- Marks the session's lineages revoked, so a logout also rejects the cookies
+-- rotated from the presented one.
 local function mark_lineages_revoked(self, meta)
   local revocation = self.revocation
   if self.storage or not revocation or not meta or not meta.sid or not meta.creation_time then
@@ -1190,11 +1197,11 @@ local function open(self, remember, meta_only)
   local audience_index
   local count = #data
   for i = 1, count do
-    -- With `decode_array_with_array_mt`, cjson encodes the entry up to its length,
-    -- and the holes cleared below would cut off the lineage id.
+    -- with `decode_array_with_array_mt`, the holes cleared below would cut off
+    -- the lineage id when the entry is encoded again
     setmetatable(data[i], nil)
 
-    -- cjson decodes the JSON null of a missing subject or lineage id as userdata
+    -- cjson decodes a missing subject or lineage id (JSON null) as userdata
     if type(data[i][3]) == "userdata" then
       data[i][3] = nil
     end
@@ -1207,28 +1214,19 @@ local function open(self, remember, meta_only)
     end
   end
 
-  -- A remember cookie, or a cookie without the audience, is checked for the
-  -- lineages of all its audiences: a cookie saved for a new audience would carry
-  -- them along, and with them a login that was logged out.
   if self.revocation then
-    for i = 1, count do
-      if remember or not audience_index or i == audience_index then
-        local revoked, err = false, nil
-        if data[i][4] then
-          revoked, err = is_revoked(self, get_lineage_revocation_key(data[i][4]), self.cookie_name, current_time)
-        end
-        if err then
-          return nil, err
-        end
-        if revoked then
-          if remember then
-            self.remember_meta = {}
-          else
-            self.meta = DUMMY_META
-          end
-          return nil, "session revoked"
-        end
+    local revoked, err = is_lineage_revoked(self, data, audience_index, remember, current_time)
+    if err then
+      return nil, err
+    end
+
+    if revoked then
+      if remember then
+        self.remember_meta = {}
+      else
+        self.meta = DUMMY_META
       end
+      return nil, "session revoked"
     end
   end
 
@@ -1248,9 +1246,8 @@ local function open(self, remember, meta_only)
 end
 
 
--- Give the audience the session is using a lineage id if it has none yet. It is
--- generated once, on the first save, and every later save carries it along. It is
--- the fourth field of the entry of the audience.
+-- Gives the audience in use a lineage id (the fourth field of its entry) on the
+-- first save; later saves carry it along.
 local function assign_lineage(self)
   local current = self.data[self.data_index]
   if current[4] then
@@ -1323,9 +1320,9 @@ local function save(self, state, remember)
   local data, data_size, cookie_chunks do
     data = self.data
     if self.revocation and not storage then
-      local ok, lerr = assign_lineage(self)
+      local ok, lineage_err = assign_lineage(self)
       if not ok then
-        return nil, lerr
+        return nil, lineage_err
       end
     end
 
@@ -2551,11 +2548,9 @@ function metatable:destroy()
     return nil, "unable to destroy nonexistent session"
   end
 
-  -- The lineage marks go first: they reject every cookie of the login, so a
-  -- failure before the session id marks cannot leave a cookie that the retry of
-  -- the logout (which stops at a session id mark and does not destroy) would
-  -- miss. The remember session is revoked before any cookie is cleared, so a
-  -- store failure leaves the browser with cookies that can still retry.
+  -- Lineage marks first: a retry of a failed logout stops at a stored session id
+  -- mark, so every lineage mark must be written before one. Cookies are cleared
+  -- only after all marks are written, so a store failure leaves them to retry.
   local ok, err = mark_lineages_revoked(self, self.meta)
   if not ok then
     return nil, err
@@ -3019,12 +3014,12 @@ function session.new(configuration)
 
   local revocation_id
   if revocation then
-    local raw = configuration and configuration.revocation
-    if raw == nil then
+    local configured = configuration and configuration.revocation
+    if configured == nil then
       revocation_id = DEFAULT_REVOCATION_ID
 
     else
-      revocation_id = get_revocation_id(raw, configuration)
+      revocation_id = get_revocation_id(configured, configuration)
     end
   end
 
