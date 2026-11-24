@@ -981,6 +981,51 @@ describe("session: revocation lineage", function()
     assert.equals("session revoked", err)
   end)
 
+  it("revokes the remember cookie on logout, writing each mark once", function()
+    initialize("closed")
+
+    local cookies = {}
+    session.__set_ngx_header(cookies)
+    local remembered = session.new({ remember = true })
+    remembered:set("test_key", "test_data")
+    assert.is_true(remembered:save())
+    local cookie = extract_cookie(cookie_name, cookies["Set-Cookie"])
+    local remember_cookie = extract_cookie("remember", cookies["Set-Cookie"])
+    assert.not_equals("", cookie)
+    assert.not_equals("", remember_cookie)
+
+    session.__set_ngx_var({
+      ["cookie_" .. cookie_name] = cookie,
+      cookie_remember = remember_cookie,
+    })
+    local logging_out = session.new({ remember = true })
+    assert.is_true(logging_out:open())
+    session.__set_ngx_header({})
+    assert.is_true(logging_out:destroy())
+
+    -- one lineage mark, written once, and a session id mark for each cookie
+    local lineage_marks, sid_marks = 0, 0
+    for key in pairs(marks) do
+      if is_lineage_key(key) then
+        lineage_marks = lineage_marks + 1
+      else
+        sid_marks = sid_marks + 1
+      end
+    end
+    assert.equals(1, lineage_writes)
+    assert.equals(1, lineage_marks)
+    assert.equals(2, sid_marks)
+
+    -- the remember cookie alone no longer restores the session
+    session.__set_ngx_var({
+      cookie_remember = remember_cookie,
+    })
+    local restored = session.new({ remember = true })
+    local ok, err = restored:open()
+    assert.is_falsy(ok)
+    assert.is_string(err)
+  end)
+
   it("does not add a lineage id when revocation is disabled", function()
     session.init({
       cookie_name = cookie_name,
